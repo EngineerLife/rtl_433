@@ -28,6 +28,7 @@ Packet payload: 1 sync nibble and 8 bytes data, 17 nibbles:
 - C: CRC8 from nibble 1 to E
 */
 
+#include <stdbool.h>
 #include "decoder.h"
 
 static int schraeder_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
@@ -137,6 +138,83 @@ static int schrader_EG53MA4_callback(r_device *decoder, bitbuffer_t *bitbuffer) 
     return 1;
 }
 
+
+static uint8_t find_byte_parity(const uint8_t byte) {
+    uint8_t parity = 0x01;
+    parity ^= (byte>>7)&0x1;
+    parity ^= (byte>>6)&0x1;
+    parity ^= (byte>>5)&0x1;
+    parity ^= (byte>>4)&0x1;
+    parity ^= (byte>>3)&0x1;
+    parity ^= (byte>>2)&0x1;
+    parity ^= byte&0x1;
+    return (parity&0x1);
+}
+
+static bool parity_check(const uint8_t* data,const uint8_t LENGTH) {
+    uint8_t parity;
+    for(int j = 0;j<LENGTH;++j) {
+        parity ^= find_byte_parity(data[j]);
+    }
+    return (parity&0x1);
+}
+
+static int schrader_SE3_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
+    data_t *data;
+    char id_str[9];
+    uint8_t flags;
+    char flags_str[9];
+    uint8_t b[5];
+
+    /* Check for incorrect number of bits received */
+    if (bitbuffer->bits_per_row[0] != 52 && bitbuffer->bits_per_row[0] != 53)
+        return DECODE_ABORT_LENGTH;
+
+    /* Discard the first 16 bits */
+    bitbuffer_extract_bytes(bitbuffer, 0, 16, b, 40);
+    /* Calculate the checksum */
+    /*checksum = add_bytes(b, 9) & 0xff;
+    if (checksum != b[9]) {
+        return DECODE_FAIL_MIC;
+    }*/
+    //TODO implement parity check
+
+    /* Get data */
+    // bits 1-3
+    uint8_t PARITY_VAL = (b[4]&0x10)>>4;
+    b[4]=b[4]&0xE0;
+    b[5]=0x00;
+    if(parity_check(b,5) != PARITY_VAL)
+    {
+        //return DECODE_FAIL_MIC;
+    }
+    flags = (b[0] & 0xE0) >> 5; //first three bits
+    // bits 4-27
+    const uint8_t ID_BYTE_1 = (((b[0] & 0x1F) << 3) | ((b[1]&0xE0)>>5));
+    const uint8_t ID_BYTE_2 = ((b[1]&0x1F) << 3) | ((b[2]&0xE0)>>5);
+    const uint8_t ID_BYTE_3 = ((b[2]&0x1F) << 3) | ((b[3]&0xE0)>>5);
+
+    const SERIAL_ID   = ID_BYTE_1<< 16|
+                        ID_BYTE_2<< 8 |
+                        ID_BYTE_3;
+
+    const uint8_t PRESSURE_INT_VAL    = ((b[3]&0x1F) << 3) | ((b[4]&0xE0)>>5);
+    sprintf(id_str, "%06X", SERIAL_ID);
+    sprintf(flags_str, "%02x", flags);
+
+    data = data_make(
+            "model",            "",             DATA_STRING, "Schrader-SE3",
+            "type",             "",             DATA_STRING, "TPMS",
+            "flags",            "",             DATA_STRING, flags_str,
+            "id",               "ID",           DATA_STRING, id_str,
+            "pressure_kPa",     "Pressure",     DATA_FORMAT, "%.1f PSI", DATA_DOUBLE, (double)PRESSURE_INT_VAL*0.2 + 0.1,
+            "mic",              "Integrity",    DATA_STRING, "N/A",
+            NULL);
+
+    decoder_output_data(decoder, data);
+    return 1;
+}
+
 static char *output_fields[] = {
         "model",
         "type",
@@ -155,6 +233,16 @@ static char *output_fields_EG53MA4[] = {
         "flags",
         "pressure_kPa",
         "temperature_F",
+        "mic",
+        NULL,
+};
+
+static char *output_fields_SE3[] = {
+        "model",
+        "type",
+        "flags",
+        "id",
+        "pressure_kPa",
         "mic",
         NULL,
 };
@@ -179,4 +267,16 @@ r_device schrader_EG53MA4 = {
         .decode_fn   = &schrader_EG53MA4_callback,
         .disabled    = 0,
         .fields      = output_fields_EG53MA4,
+};
+
+r_device schrader_SE3 = {
+        .name        = "Schrader SE3",
+        .modulation  = OOK_PULSE_MANCHESTER_ZEROBIT,
+        .short_width = 120,
+        .long_width  = 0,
+        .reset_limit = 300,
+        .decode_fn   = &schrader_SE3_callback,
+        .disabled    = 0,
+        .fields      = output_fields_SE3,
+
 };
